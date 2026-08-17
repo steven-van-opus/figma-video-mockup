@@ -2003,8 +2003,8 @@ function App() {
   }
   function addSeqImage(slot) {
     const i = document.createElement("input");
-    i.type = "file"; i.accept = "image/*";
-    i.onchange = (e) => { const f = e.target.files[0]; if (f) addSeqItem(slot, URL.createObjectURL(f), true); };
+    i.type = "file"; i.accept = "image/*,video/*";
+    i.onchange = (e) => { const f = e.target.files[0]; if (f) addSeqItem(slot, URL.createObjectURL(f), (f.type || "").startsWith("image")); };
     i.style.cssText = "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0";
     document.body.appendChild(i);
     i.addEventListener("change", () => setTimeout(() => i.remove(), 0), { once: true });
@@ -5138,10 +5138,12 @@ function App() {
                 {insp.hasMedia && <button onClick={() => removeMedia(insp.slot)} className="w-full px-3 py-2 rounded-[30px] text-sm font-medium text-red-300 bg-red-500/10 hover:bg-red-500/20 transition">Remove media</button>}
               </Sec>
               <Sec open={openSec === "Sequence"} onToggle={toggleSec} title="Sequence">
-                <p className="text-xs text-zinc-500 leading-snug">Show different images at specific times in this slot, in seconds — overrides the single image above while a window is active.</p>
+                <p className="text-xs text-zinc-500 leading-snug">Show different images or clips at specific times in this slot, in seconds — overrides the single media above while a window is active. Clips play from their start and loop if their window is longer.</p>
                 {(insp.seq || []).map(it => (
                   <div key={it.id} className="flex items-center gap-2">
-                    <img src={it.url} className="w-9 h-9 rounded-lg object-cover shrink-0 bg-white/5" />
+                    {it.img === false
+                      ? <video src={it.url} muted playsInline className="w-9 h-9 rounded-lg object-cover shrink-0 bg-white/5" />
+                      : <img src={it.url} className="w-9 h-9 rounded-lg object-cover shrink-0 bg-white/5" />}
                     <input type="number" step="0.1" min="0" value={it.start}
                       onChange={e => updateSeqItem(insp.slot, it.id, { start: Math.max(0, +e.target.value || 0) })}
                       className="w-16 px-2 py-1.5 rounded-[30px] bg-white/5 border border-white/10 text-xs text-zinc-200 outline-none" />
@@ -5155,7 +5157,7 @@ function App() {
                     </button>
                   </div>
                 ))}
-                <button onClick={() => addSeqImage(insp.slot)} className="w-full px-3 py-2 rounded-[30px] text-sm font-medium text-zinc-200 bg-white/10 hover:bg-white/15 transition">+ Add image</button>
+                <button onClick={() => addSeqImage(insp.slot)} className="w-full px-3 py-2 rounded-[30px] text-sm font-medium text-zinc-200 bg-white/10 hover:bg-white/15 transition">+ Add image or clip</button>
               </Sec>
             </div>}
 

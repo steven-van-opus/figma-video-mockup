@@ -219,33 +219,38 @@ function probeImageSize(file) {
     p.on("close", () => { const m = out.trim().match(/(\d+)x(\d+)/); res(m ? { w: +m[1], h: +m[2] } : { w: 1080, h: 1080 }); });
   });
 }
-// image sequence: synthesize one full-span video per slot with each image visible during its own
-// [start, end) window (in seconds) and fully transparent elsewhere — fed into the normal
+// media sequence: synthesize one full-span video per slot with each image or clip visible during
+// its own [start, end) window (in seconds) and fully transparent elsewhere — fed into the normal
 // single-media pipeline unchanged afterward, so the slot's own bg color shows through the gaps
 async function buildSequenceVideo(items, outFile) {
   const sorted = items.slice().sort((a, b) => a.start - b.start);
   const span = Math.max(0.5, Math.max(...sorted.map(it => it.end)));
   const { w: W, h: H } = await probeImageSize(sorted[0].file);
+  // probeDur returns 0 for stills, so a positive duration marks a video clip
+  const durs = await Promise.all(sorted.map(it => probeDur(it.file)));
   const segs = [];
   let cursor = 0;
-  for (const it of sorted) {
+  sorted.forEach((it, idx) => {
     const start = Math.max(0, it.start), end = Math.max(start, it.end);
     if (start > cursor + 0.01) segs.push({ gap: true, dur: start - cursor });
-    if (end > start) segs.push({ file: it.file, dur: end - start });
+    if (end > start) segs.push({ file: it.file, dur: end - start, video: durs[idx] > 0 });
     cursor = Math.max(cursor, end);
-  }
+  });
   if (span > cursor + 0.01) segs.push({ gap: true, dur: span - cursor });
   if (!segs.length) segs.push({ gap: true, dur: span });
   const args = ["-y"];
   segs.forEach(s => {
     if (s.gap) args.push("-f", "lavfi", "-i", `color=c=black:s=${W}x${H}:r=30:d=${s.dur.toFixed(3)}`);
+    // clips loop to fill their window when shorter than it; either way only `dur` seconds are read
+    else if (s.video) args.push("-stream_loop", "-1", "-t", s.dur.toFixed(3), "-i", s.file);
     else args.push("-loop", "1", "-t", s.dur.toFixed(3), "-i", s.file);
   });
   // the color source has no alpha plane to carry a transparent spec through format=yuva420p, so
   // force true zero alpha explicitly (same technique as the ambient-blur layer in composite() below)
+  // fps=30 on every media segment keeps the concat timeline uniform across mixed sources
   const fc = segs.map((s, i) => s.gap
     ? `[${i}:v]format=yuva420p,colorchannelmixer=aa=0.0[v${i}]`
-    : `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,format=yuva420p[v${i}]`);
+    : `[${i}:v]${s.video ? "setpts=PTS-STARTPTS," : ""}fps=30,scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,format=yuva420p[v${i}]`);
   fc.push(segs.map((_, i) => `[v${i}]`).join("") + `concat=n=${segs.length}:v=1:a=0[out]`);
   args.push("-filter_complex", fc.join(";"), "-map", "[out]", "-c:v", "qtrle", "-pix_fmt", "argb", outFile);
   await run("ffmpeg", args);
