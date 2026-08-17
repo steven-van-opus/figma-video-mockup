@@ -219,33 +219,38 @@ function probeImageSize(file) {
     p.on("close", () => { const m = out.trim().match(/(\d+)x(\d+)/); res(m ? { w: +m[1], h: +m[2] } : { w: 1080, h: 1080 }); });
   });
 }
-// image sequence: synthesize one full-span video per slot with each image visible during its own
-// [start, end) window (in seconds) and fully transparent elsewhere — fed into the normal
+// media sequence: synthesize one full-span video per slot with each image or clip visible during
+// its own [start, end) window (in seconds) and fully transparent elsewhere — fed into the normal
 // single-media pipeline unchanged afterward, so the slot's own bg color shows through the gaps
 async function buildSequenceVideo(items, outFile) {
   const sorted = items.slice().sort((a, b) => a.start - b.start);
   const span = Math.max(0.5, Math.max(...sorted.map(it => it.end)));
   const { w: W, h: H } = await probeImageSize(sorted[0].file);
+  // probeDur returns 0 for stills, so a positive duration marks a video clip
+  const durs = await Promise.all(sorted.map(it => probeDur(it.file)));
   const segs = [];
   let cursor = 0;
-  for (const it of sorted) {
+  sorted.forEach((it, idx) => {
     const start = Math.max(0, it.start), end = Math.max(start, it.end);
     if (start > cursor + 0.01) segs.push({ gap: true, dur: start - cursor });
-    if (end > start) segs.push({ file: it.file, dur: end - start });
+    if (end > start) segs.push({ file: it.file, dur: end - start, video: durs[idx] > 0 });
     cursor = Math.max(cursor, end);
-  }
+  });
   if (span > cursor + 0.01) segs.push({ gap: true, dur: span - cursor });
   if (!segs.length) segs.push({ gap: true, dur: span });
   const args = ["-y"];
   segs.forEach(s => {
     if (s.gap) args.push("-f", "lavfi", "-i", `color=c=black:s=${W}x${H}:r=30:d=${s.dur.toFixed(3)}`);
+    // clips loop to fill their window when shorter than it; either way only `dur` seconds are read
+    else if (s.video) args.push("-stream_loop", "-1", "-t", s.dur.toFixed(3), "-i", s.file);
     else args.push("-loop", "1", "-t", s.dur.toFixed(3), "-i", s.file);
   });
   // the color source has no alpha plane to carry a transparent spec through format=yuva420p, so
   // force true zero alpha explicitly (same technique as the ambient-blur layer in composite() below)
+  // fps=30 on every media segment keeps the concat timeline uniform across mixed sources
   const fc = segs.map((s, i) => s.gap
     ? `[${i}:v]format=yuva420p,colorchannelmixer=aa=0.0[v${i}]`
-    : `[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,format=yuva420p[v${i}]`);
+    : `[${i}:v]${s.video ? "setpts=PTS-STARTPTS," : ""}fps=30,scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,format=yuva420p[v${i}]`);
   fc.push(segs.map((_, i) => `[v${i}]`).join("") + `concat=n=${segs.length}:v=1:a=0[out]`);
   args.push("-filter_complex", fc.join(";"), "-map", "[out]", "-c:v", "qtrle", "-pix_fmt", "argb", outFile);
   await run("ffmpeg", args);
@@ -361,8 +366,11 @@ async function composite(W, H, rects, videoFiles, plate, outFile, ambient, ambie
   // real on-screen length, or a slowed-down clip gets cut short / a scroll-enabled image finishes early
   const effDurs = durs.map((d, i) => {
     if (d === 0) return 0;
-    const spd = (mediaXf && mediaXf[rects[i].slot] && mediaXf[rects[i].slot].speed) || 1;
-    return d / (spd || 1);
+    const t0 = mediaXf && mediaXf[rects[i].slot];
+    const spd = (t0 && t0.speed) || 1;
+    let e = d / (spd || 1);
+    if (t0 && +t0.stop > 0) e = Math.min(e, +t0.stop);   // a frozen slot never extends the output
+    return e;
   });
   // still images with "scroll" enabled need their true pixel size up front, to know which axis is
   // the aspect-mismatch pan axis — the other must stay centered once the Zoom slider adds overflow
@@ -417,6 +425,14 @@ async function composite(W, H, rects, videoFiles, plate, outFile, ambient, ambie
     const zs = t && t.s ? Math.max(0.25, t.s) : 1;
     const ox = t ? Math.round((t.x || 0) * S) : 0, oy = t ? Math.round((t.y || 0) * S) : 0;
     const zw = Math.round(w * zs / 2) * 2, zh = Math.round(h * zs / 2) * 2;
+    // freeze point: cut the clip at its on-screen stop mark — the flatten overlay below runs
+    // eof_action=repeat, so the last frame holds for the rest of the output
+    const stopAt = t && +t.stop > 0 && durs[i] > 0 ? +t.stop : 0;
+    let src = `[${i}:v]`;
+    if (stopAt) {
+      fc.push(`${src}trim=duration=${(stopAt * spd).toFixed(3)},setpts=PTS-STARTPTS[fz${i}]`);
+      src = `[fz${i}]`;
+    }
     if (t && t.scroll && t.fit !== "fit" && t.fit !== "contain" && durs[i] === 0) {   // stale scroll flag + Fit/Inset in a saved record: fit wins
       // still image, "scroll" enabled: zoom multiplies straight into the cover scale, so the pan
       // sweeps the FULL zoomed image edge-to-edge (still lands exactly at the far edge when the
@@ -431,7 +447,7 @@ async function composite(W, H, rects, videoFiles, plate, outFile, ambient, ambie
       const panIsY = !sz || (sz.h / sz.w) >= (h / w);   // fall back to vertical pan if the size probe failed
       const xExpr = panIsY ? "(in_w-out_w)/2" : `min(in_w-out_w,(in_w-out_w)/${DUR.toFixed(2)}*t)`;
       const yExpr = panIsY ? `min(in_h-out_h,(in_h-out_h)/${DUR.toFixed(2)}*t)` : "(in_h-out_h)/2";
-      fc.push(`[${i}:v]scale=${scrollZw}:${scrollZh}:force_original_aspect_ratio=increase,` +
+      fc.push(`${src}scale=${scrollZw}:${scrollZh}:force_original_aspect_ratio=increase,` +
         `crop=${w}:${h}:x='${xExpr}':y='${yExpr}',` +
         `setsar=1,format=yuva420p[vc${i}]`);
     } else if (t && (t.kb === "in" || t.kb === "out") && t.fit !== "fit" && t.fit !== "contain" && durs[i] === 0) {
@@ -440,20 +456,20 @@ async function composite(W, H, rects, videoFiles, plate, outFile, ambient, ambie
       const bw = Math.round(w * kbZs * 1.25 / 2) * 2, bh = Math.round(h * kbZs * 1.25 / 2) * 2;
       const NF = Math.max(1, Math.round(DUR * 30));
       const zex = t.kb === "in" ? `1+0.18*min(1\\,on/${NF})` : `1.18-0.18*min(1\\,on/${NF})`;
-      fc.push(`[${i}:v]scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},` +
+      fc.push(`${src}scale=${bw}:${bh}:force_original_aspect_ratio=increase,crop=${bw}:${bh},` +
         `zoompan=z='${zex}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${w}x${h}:fps=30,` +
         `setsar=1,format=yuva420p[vc${i}]`);
     } else if (zs < 1) {
       // shrunk below 100%: scale the WHOLE source down from its cover size (revealing more of
       // it as it shrinks), then crop any overflow and pad the rest with the slot background
-      fc.push(`[${i}:v]setpts=${SPTS},` +
+      fc.push(`${src}setpts=${SPTS},` +
         `scale=w='trunc((${zs.toFixed(4)}*max(${w}\,${h}*iw/ih))/2)*2':h=-2,` +
         `crop=w='min(iw,${w})':h='min(ih,${h})':x='clip((iw-out_w)/2-(${ox}),0,iw-out_w)':y='clip((ih-out_h)/2-(${oy}),0,ih-out_h)',` +
         `pad=${w}:${h}:x='clip((out_w-in_w)/2+(${ox}),0,out_w-in_w)':y='clip((out_h-in_h)/2+(${oy}),0,out_h-in_h)':color=${cssToHex(r.bg)},setsar=1,format=yuva420p[vc${i}]`);
     } else if (t && t.fit === "fit") {
       // whole video visible: scale down to fit, pan within the letterbox, pad with the slot bg
       const sw = Math.round(w * zs / 2) * 2, sh = Math.round(h * zs / 2) * 2;
-      fc.push(`[${i}:v]setpts=${SPTS},scale=${sw}:${sh}:force_original_aspect_ratio=decrease,` +
+      fc.push(`${src}setpts=${SPTS},scale=${sw}:${sh}:force_original_aspect_ratio=decrease,` +
         `crop=w='min(iw,${w})':h='min(ih,${h})':x='clip((iw-out_w)/2-(${ox}),0,iw-out_w)':y='clip((ih-out_h)/2-(${oy}),0,ih-out_h)',` +
         `pad=${w}:${h}:x='clip((out_w-in_w)/2+(${ox}),0,out_w-in_w)':y='clip((out_h-in_h)/2+(${oy}),0,out_h-in_h)':color=${cssToHex(r.bg)},setsar=1,format=yuva420p[vc${i}]`);
     } else if (t && t.fit === "contain") {
@@ -461,9 +477,9 @@ async function composite(W, H, rects, videoFiles, plate, outFile, ambient, ambie
       const pd = Math.round((t.pad != null ? t.pad : 14) * S);
       const iw = Math.max(2, Math.round((w - 2 * pd) / 2) * 2), ih = Math.max(2, Math.round((h - 2 * pd) / 2) * 2);
       const ziw = Math.round(iw * zs / 2) * 2, zih = Math.round(ih * zs / 2) * 2;
-      fc.push(`[${i}:v]setpts=${SPTS},scale=${ziw}:${zih}:force_original_aspect_ratio=increase,crop=${iw}:${ih}:x='clip((in_w-out_w)/2-(${ox}),0,in_w-out_w)':y='clip((in_h-out_h)/2-(${oy}),0,in_h-out_h)',pad=${w}:${h}:${(w - iw) / 2}:${(h - ih) / 2}:color=${cssToHex(r.bg)},setsar=1,format=yuva420p[vc${i}]`);
+      fc.push(`${src}setpts=${SPTS},scale=${ziw}:${zih}:force_original_aspect_ratio=increase,crop=${iw}:${ih}:x='clip((in_w-out_w)/2-(${ox}),0,in_w-out_w)':y='clip((in_h-out_h)/2-(${oy}),0,in_h-out_h)',pad=${w}:${h}:${(w - iw) / 2}:${(h - ih) / 2}:color=${cssToHex(r.bg)},setsar=1,format=yuva420p[vc${i}]`);
     } else {
-      fc.push(`[${i}:v]setpts=${SPTS},scale=${zw}:${zh}:force_original_aspect_ratio=increase,crop=${w}:${h}:x='clip((in_w-out_w)/2-(${ox}),0,in_w-out_w)':y='clip((in_h-out_h)/2-(${oy}),0,in_h-out_h)',setsar=1,format=yuva420p[vc${i}]`);
+      fc.push(`${src}setpts=${SPTS},scale=${zw}:${zh}:force_original_aspect_ratio=increase,crop=${w}:${h}:x='clip((in_w-out_w)/2-(${ox}),0,in_w-out_w)':y='clip((in_h-out_h)/2-(${oy}),0,in_h-out_h)',setsar=1,format=yuva420p[vc${i}]`);
     }
     let vlbl = `vc${i}`;
     if (t && t.blur && t.blur.on) {
@@ -505,7 +521,7 @@ async function composite(W, H, rects, videoFiles, plate, outFile, ambient, ambie
   const audioFlags = await Promise.all(videoFiles.map(hasAudio));
   const audible = rects.map((r, i) => (audioFlags[i] && !((mediaXf || {})[r.slot] || {}).mute) ? i : -1).filter(i => i >= 0);
   if (audible.length) {
-    audible.forEach(i => { const st = (mediaXf || {})[rects[i].slot] || {}; const sp = st.speed ? Math.max(0.1, Math.min(4, st.speed)) : 1; fc.push(`[${i}:a]asetpts=PTS-STARTPTS${atempoChain(sp)}[a${i}]`); });
+    audible.forEach(i => { const st = (mediaXf || {})[rects[i].slot] || {}; const sp = st.speed ? Math.max(0.1, Math.min(4, st.speed)) : 1; const cut = +st.stop > 0 ? `atrim=duration=${(+st.stop * sp).toFixed(3)},` : ""; fc.push(`[${i}:a]${cut}asetpts=PTS-STARTPTS${atempoChain(sp)}[a${i}]`); });
     if (audible.length > 1) fc.push(audible.map(i => `[a${i}]`).join("") + `amix=inputs=${audible.length}:duration=longest[aout]`);
   }
   args.push("-filter_complex", fc.join(";"), "-map", "[out]");

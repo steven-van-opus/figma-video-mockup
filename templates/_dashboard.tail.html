@@ -1563,8 +1563,11 @@ function App() {
         const xf0 = xfFor(sel);
         vmax = vids.reduce((a, v) => {
           const slotEl = v.closest("[data-vslot]");
-          const spd = (slotEl && xf0[slotEl.getAttribute("data-vslot")] && xf0[slotEl.getAttribute("data-vslot")].speed) || 1;
-          return Math.max(a, (v.duration || 0) / (spd || 1));
+          const t0 = slotEl && xf0[slotEl.getAttribute("data-vslot")];
+          const spd = (t0 && t0.speed) || 1;
+          let ed = (v.duration || 0) / (spd || 1);
+          if (t0 && +t0.stop > 0) ed = Math.min(ed, +t0.stop);   // a frozen slot never extends the preview
+          return Math.max(a, ed);
         }, 0);
         readMin = root ? scrollReadSeconds(root) : 0;
         measured = now;
@@ -1598,6 +1601,22 @@ function App() {
             if (Math.abs(window.__PLAYHEAD - eff) > 0.35) window.__PLAYHEAD = Math.min(eff, d);
           }
         }
+      }
+      // freeze points: a video with mediaXf.stop pauses on its frame at that mark while the rest
+      // of the preview plays on; looping back before the mark (or clearing it) resumes the clip
+      if (root) {
+        const xfZ = xfFor(sel);
+        const posZ = d > 0 ? (window.__PLAYHEAD || 0) % d : (window.__PLAYHEAD || 0);
+        root.querySelectorAll("[data-vslot] video").forEach(v => {
+          const se = v.closest("[data-vslot]"); if (!se) return;
+          const tz = xfZ[se.getAttribute("data-vslot")];
+          if (!tz || !(+tz.stop > 0)) return;
+          if (posZ >= tz.stop) { if (!v.paused) { try { v.pause(); } catch (e) {} } }
+          else if (v.paused && playingRef.current) {
+            try { v.currentTime = posZ * (tz.speed || 1); } catch (e) {}
+            const q = v.play(); if (q && q.catch) q.catch(() => {});
+          }
+        });
       }
       // image sequences: show whichever item's [start, end) window contains the playhead —
       // runs every tick (not just while playing) so scrubbing a paused preview also updates
@@ -2003,8 +2022,8 @@ function App() {
   }
   function addSeqImage(slot) {
     const i = document.createElement("input");
-    i.type = "file"; i.accept = "image/*";
-    i.onchange = (e) => { const f = e.target.files[0]; if (f) addSeqItem(slot, URL.createObjectURL(f), true); };
+    i.type = "file"; i.accept = "image/*,video/*";
+    i.onchange = (e) => { const f = e.target.files[0]; if (f) addSeqItem(slot, URL.createObjectURL(f), (f.type || "").startsWith("image")); };
     i.style.cssText = "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0";
     document.body.appendChild(i);
     i.addEventListener("change", () => setTimeout(() => i.remove(), 0), { once: true });
@@ -3443,7 +3462,7 @@ function App() {
     const __aspects = [["16:9", 16, 9], ["9:16", 9, 16], ["1:1", 1, 1], ["4:5", 4, 5], ["4:3", 4, 3]];
     const __curAr = slot.clientWidth / Math.max(1, slot.clientHeight);
     const __arMatch = __aspects.find(([, rw, rh]) => Math.abs(rw / rh - __curAr) < 0.02);
-    setInsp({ isMedia: true, hasMedia: !!slot.querySelector("video, img"), path: __mp, bgHex: __mb.hex, bgTransparent: __mb.a === 0, pattern: (__mo.styleMeta || {}).kind, styleMeta: __mo.styleMeta || null, slot: kk, mediaScale: tt.s || 1, mediaFit: tt.fit || "cover", mediaPad: tt.pad != null ? tt.pad : 14, mediaRadius: parseInt(getComputedStyle(slot).borderTopLeftRadius) || 0, mediaAspect: __arMatch ? __arMatch[0] : null, mediaMute: !!tt.mute, isVideo: !!slot.querySelector("video"), mediaSpeed: tt.speed || 1, mediaScroll: !!tt.scroll, mediaKb: tt.kb || null, borderW: __bw, borderHex: __bdHex, gradOn: !!__grad.on, gradColor: __grad.color || "#000000", gradDir: __grad.dir || "to top", gradOpacity: __grad.opacity != null ? __grad.opacity : 0.6, blurOn: !!(tt.blur && tt.blur.on), blurAmount: (tt.blur && tt.blur.amount) || 8, blurDir: (tt.blur && tt.blur.dir) || "to top", seq: seqFor(sel, kk).slice() });
+    setInsp({ isMedia: true, hasMedia: !!slot.querySelector("video, img"), path: __mp, bgHex: __mb.hex, bgTransparent: __mb.a === 0, pattern: (__mo.styleMeta || {}).kind, styleMeta: __mo.styleMeta || null, slot: kk, mediaScale: tt.s || 1, mediaFit: tt.fit || "cover", mediaPad: tt.pad != null ? tt.pad : 14, mediaRadius: parseInt(getComputedStyle(slot).borderTopLeftRadius) || 0, mediaAspect: __arMatch ? __arMatch[0] : null, mediaMute: !!tt.mute, isVideo: !!slot.querySelector("video"), mediaSpeed: tt.speed || 1, mediaStop: tt.stop || null, mediaScroll: !!tt.scroll, mediaKb: tt.kb || null, borderW: __bw, borderHex: __bdHex, gradOn: !!__grad.on, gradColor: __grad.color || "#000000", gradDir: __grad.dir || "to top", gradOpacity: __grad.opacity != null ? __grad.opacity : 0.6, blurOn: !!(tt.blur && tt.blur.on), blurAmount: (tt.blur && tt.blur.amount) || 8, blurDir: (tt.blur && tt.blur.dir) || "to top", seq: seqFor(sel, kk).slice() });
     expandGroupSelection();
   }
   // layers panel: what's on the canvas, selectable from the sidebar
@@ -3771,6 +3790,14 @@ function App() {
     const m = containerRef.current.querySelector('[data-vslot="' + k + '"] video');
     if (m) { try { m.playbackRate = v || 1; } catch (e) {} }
     setInsp(i => ({ ...i, mediaSpeed: v }));
+  }
+  // freeze point lives in mediaXf so it flows into demos + the export spec
+  function setMediaStop(k, v) {
+    pushHistory();
+    const t = xfFor(sel)[k] = xfFor(sel)[k] || { x: 0, y: 0, s: 1 };
+    t.stop = v > 0 ? v : null;
+    if (!t.stop) { const m = containerRef.current.querySelector('[data-vslot="' + k + '"] video'); if (m && m.paused && playing) { const q = m.play(); if (q && q.catch) q.catch(() => {}); } }
+    setInsp(i => ({ ...i, mediaStop: t.stop }));
   }
   // gradient overlay lives in mediaXf; the overlay div is (re)built by applySlotGradient
   function setMediaGrad(k, patch) {
@@ -5061,6 +5088,16 @@ function App() {
                     onChange={e => setMediaSpeed(insp.slot, +e.target.value / 100)}
                     className="w-full accent-white" />
                 </div>}
+                {insp.hasMedia && insp.isVideo && <div>
+                  <label className={LBL}>Freeze after</label>
+                  <div className="flex items-center gap-2">
+                    <input type="number" step="0.5" min="0" value={insp.mediaStop || ""} placeholder="off"
+                      onChange={e => setMediaStop(insp.slot, Math.max(0, +e.target.value || 0))}
+                      style={{ width: 84 }}
+                      className="px-3 py-2 rounded-[30px] bg-white/5 border border-white/10 text-sm text-zinc-200 outline-none" />
+                    <span className="text-xs text-zinc-500 leading-snug">seconds — the clip holds its frame there while the rest keeps playing</span>
+                  </div>
+                </div>}
                 <div>
                   <label className={LBL}>Border</label>
                   <div className="flex items-center gap-2">
@@ -5138,10 +5175,12 @@ function App() {
                 {insp.hasMedia && <button onClick={() => removeMedia(insp.slot)} className="w-full px-3 py-2 rounded-[30px] text-sm font-medium text-red-300 bg-red-500/10 hover:bg-red-500/20 transition">Remove media</button>}
               </Sec>
               <Sec open={openSec === "Sequence"} onToggle={toggleSec} title="Sequence">
-                <p className="text-xs text-zinc-500 leading-snug">Show different images at specific times in this slot, in seconds — overrides the single image above while a window is active.</p>
+                <p className="text-xs text-zinc-500 leading-snug">Show different images or clips at specific times in this slot, in seconds — overrides the single media above while a window is active. Clips play from their start and loop if their window is longer.</p>
                 {(insp.seq || []).map(it => (
                   <div key={it.id} className="flex items-center gap-2">
-                    <img src={it.url} className="w-9 h-9 rounded-lg object-cover shrink-0 bg-white/5" />
+                    {it.img === false
+                      ? <video src={it.url} muted playsInline className="w-9 h-9 rounded-lg object-cover shrink-0 bg-white/5" />
+                      : <img src={it.url} className="w-9 h-9 rounded-lg object-cover shrink-0 bg-white/5" />}
                     <input type="number" step="0.1" min="0" value={it.start}
                       onChange={e => updateSeqItem(insp.slot, it.id, { start: Math.max(0, +e.target.value || 0) })}
                       className="w-16 px-2 py-1.5 rounded-[30px] bg-white/5 border border-white/10 text-xs text-zinc-200 outline-none" />
@@ -5155,7 +5194,7 @@ function App() {
                     </button>
                   </div>
                 ))}
-                <button onClick={() => addSeqImage(insp.slot)} className="w-full px-3 py-2 rounded-[30px] text-sm font-medium text-zinc-200 bg-white/10 hover:bg-white/15 transition">+ Add image</button>
+                <button onClick={() => addSeqImage(insp.slot)} className="w-full px-3 py-2 rounded-[30px] text-sm font-medium text-zinc-200 bg-white/10 hover:bg-white/15 transition">+ Add image or clip</button>
               </Sec>
             </div>}
 
