@@ -26,10 +26,10 @@
     const Tag = ({ swap, text }) => {
       const v = labelText[swap];
       return (
-        <div data-pin data-swap={swap} className={"absolute top-0 left-0 z-10 flex items-center justify-center px-[16px] py-[10px] bg-black" + (window.__EDITOR ? "" : " pointer-events-none")}>
+        <div data-swap={swap} className={"flex items-center justify-center px-[20px] py-[12px] bg-black" + (window.__EDITOR ? "" : " pointer-events-none")}>
           {v === "@logo"
-            ? <img src={window.__AO_LOGO} alt="Agent Opus" className="invert h-[24px] object-contain" />
-            : <p className="font-medium leading-none text-[24px] text-white tracking-[0.2px] whitespace-nowrap font-[Geist,sans-serif]">{(v && v !== "@logo") ? v : text}</p>}
+            ? <img src={window.__AO_LOGO} alt="Agent Opus" className="invert h-[28px] object-contain" />
+            : <p className="font-medium leading-none text-[30px] text-white tracking-[0.2px] whitespace-nowrap font-[Geist,sans-serif]">{(v && v !== "@logo") ? v : text}</p>}
         </div>
       );
     };
@@ -37,13 +37,17 @@
       <div className="relative overflow-hidden bg-black" style={{ width: 1080, height: 1920 }}>
         <div className="hidden" />
         <div className="absolute inset-0 flex items-center justify-center gap-[12px]">
-          <div className="relative h-[950px] w-[534px]">
-            <Slot k="slot1" className="absolute inset-0 bg-[#dedede]" />
+          <div className="flex flex-col items-center gap-[20px]">
             {Tag({ swap: "label1", text: "Before" })}
+            <div className="relative h-[950px] w-[534px]">
+              <Slot k="slot1" className="absolute inset-0 bg-[#dedede]" />
+            </div>
           </div>
-          <div className="relative h-[950px] w-[534px]">
-            <Slot k="slot2" className="absolute inset-0 bg-[#8f8f8f]" />
+          <div className="flex flex-col items-center gap-[20px]">
             {Tag({ swap: "label2", text: "After" })}
+            <div className="relative h-[950px] w-[534px]">
+              <Slot k="slot2" className="absolute inset-0 bg-[#8f8f8f]" />
+            </div>
           </div>
         </div>
       </div>
